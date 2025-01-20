@@ -1,0 +1,104 @@
+name: Build RootFS
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-rootfs:
+    runs-on: ubuntu-latest
+
+    env:
+      HOST: "amd64"
+      RELEASE: "bullseye"
+      VARIANT: "buildd"
+      MIRROR: "http://ftp.de.debian.org/debian/"
+      PACKAGES_ARCHIVE: "packages.tar"
+      VERSION: "20230516.01"
+      WORKSPACE: "debian-bullseye-amd64"
+      FILEPP_DEB: "filepp_1.8.0-5_all.deb"
+      FILEPP_DEB_URL: "http://ftp.cn.debian.org/debian/pool/main/f/filepp/filepp_1.8.0-5_all.deb"
+      ADDITIONAL_PACKAGES: "build-essential rsync cmake python python3 autoconf automake libtool gawk make rsync unzip gzip pip curl grep"
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v3
+
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y debootstrap dpkg-dev curl tar
+
+    - name: Create Sandbox Directory
+      run: mkdir -p sandbox
+      
+    - name: Run Debootstrap
+      run: |
+        sudo /usr/sbin/debootstrap \
+          --arch=${{ env.HOST }} \
+          --variant=${{ env.VARIANT }} \
+          --no-check-gpg \
+          --make-tarball=${{ env.PACKAGES_ARCHIVE }} \
+          --keep-debootstrap-dir \
+          ${{ env.RELEASE }} \
+          ${{ env.WORKSPACE }} \
+          ${{ env.MIRROR }}
+          
+    - name: Download filepp
+      run: |
+        curl -L -o sandbox/${{ env.FILEPP_DEB }} ${{ env.FILEPP_DEB_URL }}
+        sha1sum sandbox/${{ env.FILEPP_DEB }}
+
+    - name: Extract filepp.deb
+      run: |
+        mkdir -p ${{ env.WORKSPACE }}
+        sudo dpkg-deb -x sandbox/${{ env.FILEPP_DEB }} ${{ env.WORKSPACE }}
+
+    - name: Build RootFS
+      run: |
+        sudo /usr/sbin/debootstrap \
+          --arch=${{ env.HOST }} \
+          --variant=${{ env.VARIANT }} \
+          --no-check-gpg \
+          --unpack-tarball=$(pwd)/${{ env.PACKAGES_ARCHIVE }} \
+          --keep-debootstrap-dir \
+          --exclude=build-essential,systemd \
+          ${{ env.RELEASE }} \
+          ${{ env.WORKSPACE }} \
+          ${{ env.MIRROR }}
+
+    - name: Install Additional Packages
+      run: |
+        sudo chroot ${{ env.WORKSPACE }} /bin/sh -c "apt-get update && apt-get install -y ${{ env.ADDITIONAL_PACKAGES }} && apt-get -y upgrade"
+        sudo chroot ${{ env.WORKSPACE }} /bin/sh -c "curl https://bootstrap.pypa.io/pip/2.7/get-pip.py -o get-pip.py && python get-pip.py && python -m pip install xlrd"
+    
+    - name: Configure UTF-8 Support
+      run: |
+        echo "en_US.UTF-8 UTF-8" | sudo tee -a ${{ env.WORKSPACE }}/etc/locale.gen
+        sudo chroot ${{ env.WORKSPACE }} /bin/bash -c "apt-get update && apt-get install -y locales"
+        sudo chroot ${{ env.WORKSPACE }} /bin/bash -c "locale-gen en_US.UTF-8"
+        sudo chroot ${{ env.WORKSPACE }} /bin/bash -c "update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8"
+        sudo chroot ${{ env.WORKSPACE }} /bin/bash -c "dpkg-reconfigure locales"
+
+
+
+    - name: Package RootFS
+      run: |
+        sudo tar --preserve-permissions \
+          --exclude=./var \
+          --exclude=./boot \
+          --exclude=./debootstrap \
+          --exclude=./media \
+          --exclude=./opt \
+          --exclude=./home \
+          --exclude=./srv \
+          --exclude=./dev \
+          --exclude=./tmp \
+          -zcf ${{ env.WORKSPACE }}-rootfs-${{ env.VERSION }}.tgz -C ${{ env.WORKSPACE }} .
+
+    - name: Save Artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: rootfs-${{ env.VERSION }}.tgz
+        path: ${{ env.WORKSPACE }}-rootfs-${{ env.VERSION }}.tgz
